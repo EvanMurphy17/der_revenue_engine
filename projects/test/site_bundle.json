@@ -1,0 +1,142 @@
+{
+  "version": "0.1.0",
+  "created_at": "2025-09-23T18:00:17.015020",
+  "identity": {
+    "name": "test",
+    "customer_type": "Commercial",
+    "site_address": "",
+    "notes": null
+  },
+  "load": {
+    "per_meter": false,
+    "meter_ids": [],
+    "interval_minutes": 60,
+    "start": "2025-01-01 00:00:00",
+    "end": "2026-01-01 00:00:00",
+    "est_increase_kw": null,
+    "est_increase_pct": null
+  },
+  "tariff": {
+    "baseline_tariff_name": null,
+    "historical_billing_file": null,
+    "monthly_billing": [
+      {
+        "month": "2025-01",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-02",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-03",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-04",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-05",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-06",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-07",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-08",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-09",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-10",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-11",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      },
+      {
+        "month": "2025-12",
+        "energy_kwh": 0.0,
+        "peak_demand_kw": 0.0,
+        "capacity_usd": 0.0,
+        "transmission_usd": 0.0,
+        "total_spend_usd": 0.0
+      }
+    ]
+  },
+  "pv": {
+    "mode": "aggregate",
+    "rows": [
+      {
+        "meter_id": "AGG",
+        "dc_kw": 0.0,
+        "ac_kw": 0.0
+      }
+    ]
+  },
+  "bess": {
+    "mode": "aggregate",
+    "rows": [
+      {
+        "meter_id": "AGG",
+        "power_kw": 0.0,
+        "energy_kwh": 0.0
+      }
+    ]
+  },
+  "inferred": null
+}
