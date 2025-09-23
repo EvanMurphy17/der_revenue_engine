@@ -36,7 +36,11 @@ with st.expander("Filter", expanded=False):
     q = st.text_input("Search by project name or folder")
     if q:
         q_lower = q.lower()
-        items = [it for it in items if q_lower in it["project_name"].lower() or q_lower in it["folder"].lower()]
+        items = [
+            it
+            for it in items
+            if q_lower in it["project_name"].lower() or q_lower in it["folder"].lower()
+        ]
 
 # Table view
 df = pd.DataFrame(items)
@@ -83,9 +87,19 @@ if "site_bundle" in st.session_state:
     active = st.session_state["site_bundle"]
     st.markdown("---")
     st.subheader("Active project")
-    st.write(f'**{active["identity"]["name"]}**  [{Path(st.session_state["site_bundle_path"]).parent.name}]')
-    st.caption(
-        f'Interval {active["load"]["interval_minutes"]} minutes  '
-        f'Coverage {active["load"]["start"]} to {active["load"]["end"]}  '
-        f'Per meter {active["load"]["per_meter"]}'
+
+    proj_name = active["identity"]["name"]
+    proj_folder = Path(st.session_state["site_bundle_path"]).parent.name
+    interval_min = active["load"]["interval_minutes"]
+    cov_start = active["load"]["start"]
+    cov_end = active["load"]["end"]
+    per_meter = active["load"]["per_meter"]
+
+    st.markdown(f"**{proj_name}**  [{proj_folder}]")
+
+    caption_text = (
+        f"Interval {interval_min} minutes  "
+        f"Coverage {cov_start} to {cov_end}  "
+        f"Per meter {per_meter}"
     )
+    st.caption(caption_text)

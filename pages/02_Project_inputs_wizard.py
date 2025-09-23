@@ -47,7 +47,9 @@ def _as_date(x: Any) -> date:
 def _generate_timeindex(start_d: date, end_d: date, interval_minutes: int) -> pd.DatetimeIndex:
     start_dt = datetime.combine(start_d, time(0, 0))
     end_dt_exclusive = datetime.combine(end_d + timedelta(days=1), time(0, 0))
-    return pd.date_range(start=start_dt, end=end_dt_exclusive, freq=f"{interval_minutes}min", inclusive="left")
+    return pd.date_range(
+        start=start_dt, end=end_dt_exclusive, freq=f"{interval_minutes}min", inclusive="left"
+    )
 
 
 def _empty_load_df(meter_ids: list[str], idx: pd.DatetimeIndex, aggregate: bool) -> pd.DataFrame:
@@ -112,7 +114,15 @@ with st.expander("Project identity", expanded=True):
         proj_name = st.text_input("Project name", placeholder="e.g., Midtown Plaza 1")
         cust_type = st.selectbox(
             "Customer type",
-            ["Commercial", "Industrial", "Municipal", "University", "School", "Hospital", "Residential"],
+            [
+                "Commercial",
+                "Industrial",
+                "Municipal",
+                "University",
+                "School",
+                "Hospital",
+                "Residential",
+            ],
             index=0,
         )
     with col2:
@@ -138,7 +148,9 @@ with st.expander("Load", expanded=True):
         end_input = st.date_input("Data end date", value=end_d, min_value=start_date)
         end_date = _as_date(end_input)
     with c4:
-        est_increase_type = st.selectbox("Estimated load increase type", ["None", "kW", "Percent"], index=0)
+        est_increase_type = st.selectbox(
+            "Estimated load increase type", ["None", "kW", "Percent"], index=0
+        )
 
     if per_meter:
         c5, c6 = st.columns([2, 3])
@@ -154,7 +166,10 @@ with st.expander("Load", expanded=True):
             )
             meter_ids = [x.strip() for x in ids_text.splitlines() if x.strip()]
         with c6:
-            st.info("Paste kW values directly into the table below. Rows are time intervals. Columns are meters.")
+            st.info(
+                "Paste kW values directly into the table below. " \
+                "Rows are time intervals. Columns are meters."
+            )
     else:
         meter_ids = []
 
@@ -172,15 +187,21 @@ with st.expander("Load", expanded=True):
     est_increase_kw = None
     est_increase_pct = None
     if est_increase_type == "kW":
-        est_increase_kw = st.number_input("Estimated load increase kW", min_value=0.0, value=0.0, step=1.0)
+        est_increase_kw = st.number_input(
+            "Estimated load increase kW", min_value=0.0, value=0.0, step=1.0
+        )
     elif est_increase_type == "Percent":
-        est_increase_pct = st.number_input("Estimated load increase percent", min_value=0.0, value=0.0, step=0.5)
+        est_increase_pct = st.number_input(
+            "Estimated load increase percent", min_value=0.0, value=0.0, step=0.5
+        )
 
 # -----------------------------------------------------------------------------
 # Tariff inputs
 # -----------------------------------------------------------------------------
 with st.expander("Tariff", expanded=False):
-    baseline_tariff = st.text_input("Current baseline tariff name", placeholder="Will be inferred from address later")
+    baseline_tariff = st.text_input(
+        "Current baseline tariff name", placeholder="Will be inferred from address later"
+    )
 
     st.markdown("**Optional monthly billing summary**")
     months = _month_index(start_date, end_date)
@@ -189,14 +210,20 @@ with st.expander("Tariff", expanded=False):
     column_cfg = {
         "month": st.column_config.TextColumn(help="YYYY-MM"),
         "energy_usd": st.column_config.NumberColumn(help="Energy charge dollars for the month"),
-        "peak_demand_usd": st.column_config.NumberColumn(help="Demand charge dollars for the month"),
+        "peak_demand_usd": st.column_config.NumberColumn(
+            help="Demand charge dollars for the month"
+        ),
         "capacity_usd": st.column_config.NumberColumn(help="Billed capacity charge dollars"),
-        "transmission_usd": st.column_config.NumberColumn(help="Billed transmission charge dollars"),
+        "transmission_usd": st.column_config.NumberColumn(
+            help="Billed transmission charge dollars"
+        ),
         "total_spend_usd": st.column_config.NumberColumn(help="Total utility spend for the month"),
     }
     if per_meter and meter_ids:
         column_cfg = {
-            "meter_id": st.column_config.SelectboxColumn(options=meter_ids, help="Billing meter ID"),
+            "meter_id": st.column_config.SelectboxColumn(
+                options=meter_ids, help="Billing meter ID"
+            ),
             **column_cfg,
         }
 
@@ -207,14 +234,22 @@ with st.expander("Tariff", expanded=False):
         key="billing_editor",
         column_config=column_cfg,
     )
-    st.caption("Leave any fields at zero if unknown. You can also attach raw bills on a later page.")
+    st.caption(
+        "Leave any fields at zero if unknown. You can also attach raw bills on a later page."
+    )
 
 # -----------------------------------------------------------------------------
 # PV inputs
 # -----------------------------------------------------------------------------
 with st.expander("PV", expanded=False):
     pv_mode_label = "Per meter" if per_meter else "Aggregate"
-    st.radio("PV allocation follows Load selection", [pv_mode_label], index=0, horizontal=True, disabled=True)
+    st.radio(
+        "PV allocation follows Load selection",
+        [pv_mode_label],
+        index=0,
+        horizontal=True,
+        disabled=True,
+    )
 
     if per_meter and meter_ids:
         st.write("Enter DC and AC nameplate by meter")
@@ -225,7 +260,11 @@ with st.expander("PV", expanded=False):
 
     pv_df = st.data_editor(pv_df, num_rows="dynamic", use_container_width=True, key="pv_editor")
     pv_rows: list[PVRow] = [
-        PVRow(meter_id=str(r["meter_id"]), dc_kw=_ensure_positive_float(r["dc_kw"]), ac_kw=_ensure_positive_float(r["ac_kw"]))
+        PVRow(
+            meter_id=str(r["meter_id"]),
+            dc_kw=_ensure_positive_float(r["dc_kw"]),
+            ac_kw=_ensure_positive_float(r["ac_kw"]),
+        )
         for _, r in pv_df.iterrows()
     ]
 
@@ -234,7 +273,13 @@ with st.expander("PV", expanded=False):
 # -----------------------------------------------------------------------------
 with st.expander("BESS", expanded=False):
     bess_mode_label = "Per meter" if per_meter else "Aggregate"
-    st.radio("BESS allocation follows Load selection", [bess_mode_label], index=0, horizontal=True, disabled=True)
+    st.radio(
+        "BESS allocation follows Load selection",
+        [bess_mode_label],
+        index=0,
+        horizontal=True,
+        disabled=True,
+    )
 
     if per_meter and meter_ids:
         st.write("Enter power and energy by meter")
@@ -243,9 +288,15 @@ with st.expander("BESS", expanded=False):
         st.write("Enter a single aggregate BESS row")
         bess_df = pd.DataFrame({"meter_id": ["AGG"], "power_kw": [0.0], "energy_kwh": [0.0]})
 
-    bess_df = st.data_editor(bess_df, num_rows="dynamic", use_container_width=True, key="bess_editor")
+    bess_df = st.data_editor(
+        bess_df, num_rows="dynamic", use_container_width=True, key="bess_editor"
+    )
     bess_rows: list[BESSRow] = [
-        BESSRow(meter_id=str(r["meter_id"]), power_kw=_ensure_positive_float(r["power_kw"]), energy_kwh=_ensure_positive_float(r["energy_kwh"]))
+        BESSRow(
+            meter_id=str(r["meter_id"]),
+            power_kw=_ensure_positive_float(r["power_kw"]),
+            energy_kwh=_ensure_positive_float(r["energy_kwh"]),
+        )
         for _, r in bess_df.iterrows()
     ]
 
@@ -280,8 +331,16 @@ if save_clicked:
         per_meter=per_meter,
         meter_ids=meter_ids if per_meter else [],
         interval_minutes=interval_min,
-        start=str(edited_df.index.min()) if not edited_df.empty else str(datetime.combine(start_date, time(0, 0))),
-        end=str(edited_df.index.max() + timedelta(minutes=interval_min)) if not edited_df.empty else str(datetime.combine(end_date + timedelta(days=1), time(0, 0))),
+        start=(
+            str(edited_df.index.min())
+            if not edited_df.empty
+            else str(datetime.combine(start_date, time(0, 0)))
+        ),
+        end=(
+            str(edited_df.index.max() + timedelta(minutes=interval_min))
+            if not edited_df.empty
+            else str(datetime.combine(end_date + timedelta(days=1), time(0, 0)))
+        ),
         est_increase_kw=est_increase_kw,
         est_increase_pct=est_increase_pct,
     )
@@ -346,4 +405,9 @@ if save_clicked:
     st.session_state["site_bundle"] = bundle.model_dump()
 
     with open(json_path, "rb") as jf:
-        st.download_button("Download site bundle JSON", jf.read(), file_name=json_path.name, mime="application/json")
+        st.download_button(
+            "Download site bundle JSON",
+            jf.read(),
+            file_name=json_path.name,
+            mime="application/json",
+        )

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 
 from dre.models import SiteBundle
 
 
-def save_site_bundle(bundle: SiteBundle, load_df: pd.DataFrame, project_dir: Path) -> tuple[Path, Path]:
+def save_site_bundle(
+    bundle: SiteBundle, load_df: pd.DataFrame, project_dir: Path
+) -> tuple[Path, Path]:
     """
     Write load CSV and bundle JSON into project_dir.
     Returns paths to JSON and CSV.
@@ -34,6 +36,7 @@ def save_site_bundle(bundle: SiteBundle, load_df: pd.DataFrame, project_dir: Pat
 
 # ---------- New helpers for discovery and loading ----------
 
+
 def projects_root(repo_root: Path) -> Path:
     """Return the projects folder path, creating it if missing."""
     root = Path(repo_root) / "projects"
@@ -53,7 +56,7 @@ def iter_bundle_paths(projects_dir: Path) -> Iterable[Path]:
 
 def load_site_bundle(json_path: Path) -> SiteBundle:
     """Load a SiteBundle from a JSON file path."""
-    with open(json_path, "r", encoding="utf-8") as f:
+    with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
     return SiteBundle.model_validate(data)
 

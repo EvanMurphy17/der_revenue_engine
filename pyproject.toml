@@ -25,6 +25,7 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B"]
 fix = true
 exclude = ["data", "outputs"]
+ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -32,3 +33,6 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unused_configs = true
+
+[project.scripts]
+dre-dsire-db = "dre.ops.dsire_db:app"

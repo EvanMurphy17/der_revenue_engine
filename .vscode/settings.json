@@ -4,7 +4,6 @@
     "source.fixAll": "always",
     "source.organizeImports": "always"
   },
-  "python.analysis.typeCheckingMode": "basic",
   "python.defaultInterpreterPath": "C:\\Users\\Evan\\anaconda3\\envs\\der_mvp\\python.exe",
   "python.terminal.activateEnvironment": true,
   "python.condaPath": "C:\\Users\\Evan\\anaconda3\\Scripts\\conda.exe",
