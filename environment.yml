@@ -1,0 +1,22 @@
+﻿name: der_mvp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.7
+  - pip
+  - pip:
+      - streamlit==1.38.0
+      - pandas>=2.2
+      - numpy>=1.26
+      - pydantic>=2.8
+      - python-dotenv>=1.0
+      - plotly>=5.22
+      - altair>=5.0
+      - typer>=0.12
+      - rich>=13.7
+      - ruff>=0.6
+      - black>=24.8
+      - mypy>=1.10
+      - pytest>=8.3
+      - pre-commit>=3.7
+      - detect-secrets>=1.4

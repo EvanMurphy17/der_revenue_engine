@@ -1,0 +1,8 @@
+﻿{
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "always",
+    "source.organizeImports": "always"
+  },
+  "python.analysis.typeCheckingMode": "basic"
+}
