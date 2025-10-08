@@ -111,3 +111,42 @@ class SiteBundle(BaseModel):
 
     def json_name(self) -> str:
         return "site_bundle.json"
+
+# --- Merchant overlay helpers ---
+
+def estimate_plc_nspl_savings(
+    *,
+    current_plc_kw: float,
+    current_nspl_kw: float,
+    capacity_rate_per_kw_year: float,
+    transmission_rate_per_kw_year: float,
+    avg_reduction_kw: float,
+    coverage_fraction_capacity: float,
+    coverage_fraction_transmission: float,
+) -> dict[str, float]:
+    """
+    Screening calculator for PLC/NSPL savings.
+
+    New PLC = max(PLC - avg_reduction_kw * coverage_cap, 0)
+    New NSPL = max(NSPL - avg_reduction_kw * coverage_tx, 0)
+
+    Savings = (PLC_old - PLC_new) * cap_rate + (NSPL_old - NSPL_new) * tx_rate
+    """
+    plc_red = max(min(avg_reduction_kw * coverage_fraction_capacity, current_plc_kw), 0.0)
+    nspl_red = max(min(avg_reduction_kw * coverage_fraction_transmission, current_nspl_kw), 0.0)
+
+    new_plc = max(current_plc_kw - plc_red, 0.0)
+    new_nspl = max(current_nspl_kw - nspl_red, 0.0)
+
+    cap_save = plc_red * float(capacity_rate_per_kw_year)
+    tx_save = nspl_red * float(transmission_rate_per_kw_year)
+
+    return {
+        "plc_reduction_kw": plc_red,
+        "new_plc_kw": new_plc,
+        "capacity_savings_usd_yr": cap_save,
+        "nspl_reduction_kw": nspl_red,
+        "new_nspl_kw": new_nspl,
+        "transmission_savings_usd_yr": tx_save,
+        "total_savings_usd_yr": cap_save + tx_save,
+    }
