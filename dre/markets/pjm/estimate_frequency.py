@@ -1,206 +1,260 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import datetime
-from typing import cast
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 
-from dre.clients.pjm import PJMClient
-
-from .feeds import (
-    reg_zone_prelim_bill,  # keep using feeds for prices; call client directly for market results
-)
+Ranking = Literal["full", "rmccp", "rmpcp"]
 
 
 @dataclass
 class BESSParams:
+    """
+    Minimal BESS shape for frequency estimation.
+    nameplate_mw: regulation capability (MW) we assume offered when selected.
+    duration_hours: usable energy (MWh) / nameplate_mw
+    """
     nameplate_mw: float
     duration_hours: float
-    max_reg_hours_per_day: float | None = None
-    roundtrip_efficiency: float = 0.88  # placeholder for future energy checks
 
 
-# ---------- duration-feasible Top-N selector ----------
-
-def _count_consecutive(selected: set[pd.Timestamp], t: pd.Timestamp, step_hours: int) -> int:
-    cnt = 0
-    cur = t + pd.Timedelta(hours=step_hours)
-    while cur in selected:
-        cnt += 1
-        cur = cur + pd.Timedelta(hours=step_hours)
-    return cnt
-
-
-def select_top_n_hours_respecting_duration(
-    hourly_df: pd.DataFrame,
-    n_hours: int,
-    duration_hours: float,
+def compute_n_hours_from_cycles(
     *,
-    ts_col: str = "datetime_beginning_ept",
-    score_col: str = "rank_metric",
-) -> pd.DataFrame:
+    bess: BESSParams,
+    annual_cycles: int,
+    throughput_ratio_mwh_per_hour: float,
+    window_hours: int,
+) -> int:
     """
-    Greedy select highest `score_col` hours with constraint: no >duration_hours consecutive hours.
+    Convert an annual cycles budget into a total hours budget for Top-N selection.
+
+    Each full cycle consumes `duration_hours` of energy.
+    If operating regulation "uses" on average `throughput_ratio` MWh per hour
+    (e.g., 0.5 MWh/h), then hours per cycle ≈ duration_hours / throughput_ratio.
+    For N cycles per year, total hours ≈ (duration_hours / throughput_ratio) * N.
+
+    We clamp to the number of available rows in the window.
     """
-    if hourly_df.empty or n_hours <= 0:
-        return hourly_df.head(0).copy()
-
-    df = hourly_df.dropna(subset=[ts_col, score_col]).copy()
-    df[ts_col] = pd.to_datetime(df[ts_col])
-    df = df.sort_values(score_col, ascending=False).reset_index(drop=True)
-
-    dur = int(round(duration_hours))
-    selected: set[pd.Timestamp] = set()
-    chosen_rows: list[int] = []
-
-    for i, row in df.iterrows():
-        idx = cast(int, i)  # appease type checkers
-        t = cast(pd.Timestamp, row[ts_col])
-        left = _count_consecutive(selected, t, -1)
-        right = _count_consecutive(selected, t, +1)
-        if left + 1 + right <= dur:
-            selected.add(t)
-            chosen_rows.append(idx)
-            if len(chosen_rows) >= n_hours:
-                break
-
-    out = df.loc[chosen_rows].sort_values(ts_col).reset_index(drop=True)
-    return out
+    tr = max(float(throughput_ratio_mwh_per_hour), 1e-6)  # prevent divide-by-zero
+    raw_hours = (float(bess.duration_hours) / tr) * float(max(annual_cycles, 0))
+    hours = int(math.floor(raw_hours))
+    hours = max(0, min(hours, int(max(window_hours, 0))))
+    return hours
 
 
-# ---------- helpers ----------
-
-def _series_numeric(df: pd.DataFrame, candidates: list[str], default: float = np.nan) -> pd.Series:
-    """Return the first present candidate column coerced to numeric; else a numeric Series of `default`."""
-    for c in candidates:
-        if c in df.columns:
-            return pd.to_numeric(df[c], errors="coerce")
-    return pd.Series(default, index=df.index, dtype="float64")
+def _num_col(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return a numeric Series for `col` (or NaNs if not present)."""
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce")
+    # ensure index length matches for arithmetic
+    return pd.Series(np.nan, index=df.index, dtype="float64")
 
 
-def _filter_rto(df: pd.DataFrame) -> pd.DataFrame:
-    # Restrict to PJM RTO / aggregated area
-    for col in ("market_area", "marketregionname", "market_region", "market"):
-        if col in df.columns:
-            s = df[col].astype(str).str.upper()
-            mask = s.str.contains("RTO")
-            return df[mask]
-    return df  # if no area column, pass through
+def _hourly_payment_components(
+    df: pd.DataFrame,
+    *,
+    nameplate_mw: float,
+    performance_score: float,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Build hourly capability & performance credits given RMCCP, RMPCP, mileage ratio.
+
+      capability_credit   = RMCCP * MWh * performance_score
+      performance_credit  = RMPCP * MWh * mileage_ratio * performance_score
+      where MWh = nameplate_mw * 1h  (hourly granularity)
+    """
+    mw = float(nameplate_mw)
+    perf = float(performance_score)
+
+    rmccp = _num_col(df, "rmccp")
+    rmpcp = _num_col(df, "rmpcp")
+    mileage_ratio = _num_col(df, "mileage_ratio").fillna(1.0)
+
+    mwh = mw * 1.0  # 1h resolution
+    cap = (rmccp * mwh * perf).astype("float64")
+    perf_cr = (rmpcp * mwh * mileage_ratio * perf).astype("float64")
+    total = (cap.fillna(0) + perf_cr.fillna(0)).fillna(0).astype("float64")
+    return cap.fillna(0), perf_cr.fillna(0), total
 
 
-# ---------- Estimator (capability + performance credits) ----------
+def _rank_vector(
+    df: pd.DataFrame,
+    *,
+    nameplate_mw: float,
+    performance_score: float,
+    ranking: Ranking,
+) -> pd.Series:
+    """Ranking vector used for Top-N pick."""
+    if ranking == "rmccp":
+        return _num_col(df, "rmccp")
+    if ranking == "rmpcp":
+        return _num_col(df, "rmpcp")
+    # default: full hourly payment
+    _, _, total = _hourly_payment_components(
+        df, nameplate_mw=nameplate_mw, performance_score=performance_score
+    )
+    return total
+
+
+def _pick_top_n_with_duration_guard(
+    df: pd.DataFrame,
+    *,
+    score: pd.Series,
+    n_hours: int,
+    max_consecutive: int,
+) -> pd.Index:
+    """
+    Greedy pick of top-N hours with a 'no more than max_consecutive consecutive hours' constraint.
+
+    Implementation detail:
+      - Sort by score descending, then iterate.
+      - Keep a boolean mask of chosen hours; when considering hour t, reject if it would
+        make any block of > max_consecutive consecutive 'True' values once selected.
+    """
+    if n_hours <= 0 or df.empty:
+        return pd.Index([])
+
+    # Ensure datetime is sorted and unique
+    tmp = df.copy()
+    tmp = tmp.dropna(subset=["datetime_beginning_ept"]).copy()
+    tmp["datetime_beginning_ept"] = pd.to_datetime(tmp["datetime_beginning_ept"], errors="coerce")
+    tmp = tmp.dropna(subset=["datetime_beginning_ept"]).drop_duplicates("datetime_beginning_ept")
+    tmp = tmp.sort_values("datetime_beginning_ept").reset_index(drop=False)  # keep original index
+    orig_index: pd.Series = tmp["index"]
+
+    # Candidate order by score
+    score_aligned = score.reindex(df.index)
+    order = score_aligned.loc[tmp["index"]].sort_values(ascending=False).index.to_list()
+
+    chosen = np.zeros(len(tmp), dtype=bool)
+    n_selected = 0
+    pos_map = {idx: pos for pos, idx in enumerate(tmp["index"])}
+
+    for idx in order:
+        if n_selected >= n_hours:
+            break
+        pos = pos_map.get(idx)
+        if pos is None:
+            continue
+
+        # Try selecting this position
+        chosen[pos] = True
+
+        # compute run length around this pos
+        run_len = 1
+        i = pos - 1
+        while i >= 0 and chosen[i]:
+            run_len += 1
+            i -= 1
+        i = pos + 1
+        while i < len(chosen) and chosen[i]:
+            run_len += 1
+            i += 1
+
+        if run_len > max_consecutive:
+            chosen[pos] = False  # revert
+            continue
+
+        n_selected += 1
+
+    selected_idx_series = orig_index[chosen]
+    # Return as an Index (not a Series) to satisfy typing
+    return pd.Index(selected_idx_series.to_list())
+
 
 def estimate_reg_revenue_top_n(
-    client: PJMClient,
-    start_ept: datetime,
-    end_ept: datetime,
+    *,
+    hourly_df: pd.DataFrame,
     bess: BESSParams,
     n_hours: int,
-    *,
-    ranking: str = "full",            # "full" (default), "rmccp", or "rmpcp"
-    performance_score: float = 0.90,
+    ranking: Ranking = "full",
+    performance_score: float = 0.9,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    1) Pull hourly RMCCP/RMPCP (reg_zone_prelim_bill).
-    2) Pull regA/regD hourly mileage (reg_market_results), compute ratio=regd/rega.
-    3) Build ranking metric per `ranking` and select Top-N with duration feasibility.
-    4) Compute credits:
-         mwh = committed_mw * 1.0  (hourly resolution)
-         capability_credit = rmccp * mwh * performance_score
-         performance_credit = rmpcp * mwh * mileage_ratio * performance_score
-         total_payment = capability_credit + performance_credit
+    Select top-N hours (with consecutive-hours constraint = round(bess.duration_hours))
+    and compute capability/performance/total revenue.
+
+    Returns:
+      selected_hours_df, summary_df (richer metrics)
     """
-    # Prices (via feeds wrapper)
-    prices = reg_zone_prelim_bill(client, start_ept, end_ept)
-    if prices.empty:
-        return prices.head(0), pd.DataFrame({"metric": ["hours_selected"], "value": [0]})
-    prices = prices[["datetime_beginning_ept", "rmccp", "rmpcp"]].dropna(subset=["datetime_beginning_ept"])
-    prices["datetime_beginning_ept"] = pd.to_datetime(prices["datetime_beginning_ept"])
-    prices["rmccp"] = pd.to_numeric(prices["rmccp"], errors="coerce")
-    prices["rmpcp"] = pd.to_numeric(prices["rmpcp"], errors="coerce")
+    df = hourly_df.copy()
+    if df.empty or n_hours <= 0:
+        empty_sel = df.iloc[:0].copy()
+        empty_summary = pd.DataFrame(
+            {
+                "metric": [
+                    "selected_hours",
+                    "capability_credit_usd",
+                    "performance_credit_usd",
+                    "total_payment_usd",
+                    "avg_rmccp",
+                    "avg_rmpcp",
+                    "avg_mileage_ratio",
+                    "ranking",
+                    "nameplate_mw",
+                    "performance_score",
+                ],
+                "value": [0, 0.0, 0.0, 0.0, np.nan, np.nan, np.nan, ranking, bess.nameplate_mw, performance_score],
+            }
+        )
+        return empty_sel, empty_summary
 
-    # Market results: hourly mileage fields (call the client method directly)
-    mkt = client.reg_market_results(start_ept, end_ept)  # omit fields to avoid 400s
-    if not mkt.empty and "datetime_beginning_ept" in mkt.columns:
-        mkt["datetime_beginning_ept"] = pd.to_datetime(mkt["datetime_beginning_ept"], errors="coerce")
-        mkt = _filter_rto(mkt)
+    df["datetime_beginning_ept"] = pd.to_datetime(df["datetime_beginning_ept"], errors="coerce")
+    df = df.dropna(subset=["datetime_beginning_ept"]).drop_duplicates("datetime_beginning_ept")
+    df = df.sort_values("datetime_beginning_ept").reset_index(drop=True)
 
-        # Accept multiple plausible field names; per PJM docs: rega_hourly / regd_hourly
-        rega = _series_numeric(mkt, ["rega_hourly", "reg_a_hourly", "rega_mileage"]).replace(0, np.nan)
-        regd = _series_numeric(mkt, ["regd_hourly", "reg_d_hourly", "regd_mileage"])
-        mkt = mkt.assign(mileage_ratio=(regd / rega).replace([np.inf, -np.inf], np.nan).fillna(1.0))
+    # Ranking vector
+    score = _rank_vector(df, nameplate_mw=bess.nameplate_mw, performance_score=performance_score, ranking=ranking)
 
-        ratio_df = mkt[["datetime_beginning_ept", "mileage_ratio"]].dropna(subset=["datetime_beginning_ept"])
-        ratio_df = ratio_df.groupby("datetime_beginning_ept", as_index=False)["mileage_ratio"].mean()
-    else:
-        ratio_df = pd.DataFrame({"datetime_beginning_ept": prices["datetime_beginning_ept"], "mileage_ratio": 1.0})
+    # Pick with duration guard
+    max_consec = max(1, int(round(bess.duration_hours)))
+    sel_idx = _pick_top_n_with_duration_guard(df, score=score, n_hours=int(n_hours), max_consecutive=max_consec)
 
-    # Merge ratio into prices
-    merged = prices.merge(ratio_df, on="datetime_beginning_ept", how="left")
-    merged["mileage_ratio"] = pd.to_numeric(merged["mileage_ratio"], errors="coerce").fillna(1.0)
+    sel = df.loc[sel_idx].sort_values("datetime_beginning_ept").reset_index(drop=True)
 
-    # Build ranking metric
-    r = ranking.strip().lower()
-    if r == "rmccp":
-        merged["rank_metric"] = merged["rmccp"]
-    elif r == "rmpcp":
-        merged["rank_metric"] = merged["rmpcp"]
-    else:
-        # Full hourly payment per MW (constants M & S omitted since they don't affect ranking)
-        merged["rank_metric"] = merged["rmccp"] + merged["rmpcp"] * merged["mileage_ratio"]
-
-    # Top-N selection with duration constraint
-    chosen = select_top_n_hours_respecting_duration(
-        merged,
-        n_hours=n_hours,
-        duration_hours=float(bess.duration_hours),
-        ts_col="datetime_beginning_ept",
-        score_col="rank_metric",
+    # Payments
+    cap, perf, total = _hourly_payment_components(sel, nameplate_mw=bess.nameplate_mw, performance_score=performance_score)
+    sel = sel.assign(
+        capability_credit_usd=cap,
+        performance_credit_usd=perf,
+        total_payment_usd=total,
     )
 
-    committed_mw = float(bess.nameplate_mw)
-    chosen = chosen.copy()
-    chosen["committed_mw"] = committed_mw
-    chosen["mwh"] = committed_mw * 1.0
-    chosen["performance_score"] = float(performance_score)
+    # Summary (richer but simple scalars)
+    avg_rmccp = float(_num_col(sel, "rmccp").mean()) if len(sel) else float("nan")
+    avg_rmpcp = float(_num_col(sel, "rmpcp").mean()) if len(sel) else float("nan")
+    avg_mileage = float(_num_col(sel, "mileage_ratio").mean()) if len(sel) else float("nan")
 
-    # Credits
-    chosen["capability_credit_$"] = chosen["rmccp"] * chosen["mwh"] * chosen["performance_score"]
-    chosen["performance_credit_$"] = (
-        chosen["rmpcp"] * chosen["mwh"] * chosen["mileage_ratio"] * chosen["performance_score"]
-    )
-    chosen["total_payment_$"] = chosen["capability_credit_$"] + chosen["performance_credit_$"]
-
-    # Summary (keep numeric for downloads; cast to string in UI if needed)
     summary = pd.DataFrame(
         {
             "metric": [
-                "ranking",
-                "hours_selected",
-                "avg_RMPCP",
-                "avg_RMCCP",
+                "selected_hours",
+                "capability_credit_usd",
+                "performance_credit_usd",
+                "total_payment_usd",
+                "avg_rmccp",
+                "avg_rmpcp",
                 "avg_mileage_ratio",
+                "ranking",
+                "nameplate_mw",
                 "performance_score",
-                "committed_MW",
-                "total_capability_$",
-                "total_performance_$",
-                "total_payment_$",
             ],
             "value": [
-                r,
-                int(len(chosen)),
-                float(np.nanmean(chosen["rmpcp"])) if len(chosen) else np.nan,
-                float(np.nanmean(chosen["rmccp"])) if len(chosen) else np.nan,
-                float(np.nanmean(chosen["mileage_ratio"])) if len(chosen) else np.nan,
+                int(len(sel)),
+                float(cap.sum()),
+                float(perf.sum()),
+                float(total.sum()),
+                avg_rmccp,
+                avg_rmpcp,
+                avg_mileage,
+                ranking,
+                float(bess.nameplate_mw),
                 float(performance_score),
-                committed_mw,
-                float(chosen["capability_credit_$"].sum()),
-                float(chosen["performance_credit_$"].sum()),
-                float(chosen["total_payment_$"].sum()),
             ],
         }
     )
 
-    return chosen, summary
+    return sel, summary
