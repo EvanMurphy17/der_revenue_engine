@@ -15,6 +15,18 @@ from dre.catalog.dsire_catalog import (
     query_programs_by_state,
 )
 from dre.config import project_root
+from dre.markets.demand_response import (
+    _normalize_columns,
+    ensure_dr_available,
+    filter_dr_for_entity,
+    latest_dr_estimate,
+    load_dr_table,
+    sector_from_project_customer_type,
+    summarize_dr,
+)
+
+# ISO panel + DR helpers (logic lives in module, not in UI)
+from dre.ui.iso_panel import render_iso_panel
 
 # -----------------------------------------------------------------------------
 # Make the repo importable when running this page directly in Streamlit
@@ -58,12 +70,84 @@ if "site_bundle" not in st.session_state:
 
 bundle = st.session_state["site_bundle"]
 addr = (bundle["identity"].get("site_address") or "").strip()
+customer_type = (bundle["identity"].get("customer_type") or "").strip()
 
 def _guess_state_from_address(address: str) -> str:
     m = re.findall(r"\b([A-Z]{2})\b", address.upper())
     return m[-1] if m else "CA"
 
 state_guess = _guess_state_from_address(addr)
+
+# -----------------------------------------------------------------------------
+# ISO / BA / Utility via PUDL (reusable panel, used across pages)
+# -----------------------------------------------------------------------------
+iso_info, _trace = render_iso_panel(
+    address=addr,
+    mapping_year=date.today().year,
+    openei_api_key=None,  # from .env if present
+)
+
+util_id_eia = iso_info.utility_id_eia
+ba_id_eia = iso_info.balancing_authority_id_eia
+state_from_iso = iso_info.state or state_guess
+
+st.markdown("---")
+
+# -----------------------------------------------------------------------------
+# Demand Response (EIA-861 via PUDL) — latest year & $/kW estimator
+# -----------------------------------------------------------------------------
+st.subheader("Demand Response (latest year) — EIA-861 via PUDL")
+
+ensure_dr_available()
+dr = load_dr_table()
+if dr is None or dr.empty:
+    st.error(
+        "Demand Response table not available. Try:\n\n"
+        "`python -m dre.ops.pudl_fetch download --table core_eia861__yearly_demand_response`"
+    )
+else:
+    dr = _normalize_columns(dr)
+
+    inferred_sector = sector_from_project_customer_type(customer_type)
+    sector_choices = ["(All)", "Residential", "Commercial", "Industrial"]
+    default_idx = sector_choices.index(inferred_sector) if inferred_sector in sector_choices else 0
+    sector_pick = st.selectbox(
+        "Customer class (inferred from project; override if needed)",
+        options=sector_choices,
+        index=default_idx,
+    )
+    sector_filter: str | None = None if sector_pick == "(All)" else sector_pick
+
+    fdf = filter_dr_for_entity(
+        dr,
+        utility_id_eia=util_id_eia,
+        ba_id_eia=ba_id_eia,
+        state=state_from_iso,
+        sector=sector_filter,
+    )
+
+    if fdf.empty:
+        st.info("No demand response records found for this utility / BA / state selection.")
+    else:
+        # Latest-year summary table
+        summ = summarize_dr(fdf).copy()
+        # Render-friendly string conversion to avoid Arrow warnings
+        summ["value"] = summ["value"].apply(
+            lambda v: "" if v is None else (f"{v:,.2f}" if isinstance(v, (int, float)) else str(v))
+        )
+        st.dataframe(summ, use_container_width=True, hide_index=True)
+
+        # $/kW estimator (centralized in module)
+        est = latest_dr_estimate(fdf)
+        m1, m2, m3 = st.columns([1, 1, 1])
+        with m1:
+            st.metric("Latest year expenditures (USD)", "N/A" if est.expenditures_usd is None else f"{est.expenditures_usd:,.0f}")
+        with m2:
+            st.metric("Actual peak reduction (MW)", "N/A" if est.actual_reduction_mw is None else f"{est.actual_reduction_mw:,.2f}")
+        with m3:
+            st.metric("Estimated DR $/kW (annual)", "N/A" if est.usd_per_kw_year is None else f"{est.usd_per_kw_year:,.2f}")
+
+st.markdown("---")
 
 # -----------------------------------------------------------------------------
 # Require local catalog (SQLite)
@@ -111,7 +195,6 @@ with ctrl_left:
 
 with ctrl_right:
     st.caption("Filters")
-    # We’ll populate program type/category choices after we load state data
     program_types_placeholder = st.empty()
     program_categories_placeholder = st.empty()
     tech_contains = st.text_input("Technology contains", placeholder="Solar, Storage, Demand Response")
@@ -217,7 +300,6 @@ with left:
         selected_label = st.selectbox("Inspect a program", labels, index=default_idx) if labels else None
         selected_pid = None
         if selected_label:
-            # Find program_id by label
             for pid, lbl in options:
                 if lbl == selected_label:
                     selected_pid = pid
@@ -225,7 +307,6 @@ with left:
 
 with right:
     st.subheader("Downloads")
-    # Drop raw_json for CSV
     drop_cols = ["raw_json"]
     to_csv = filtered.drop(columns=[c for c in drop_cols if c in filtered.columns], errors="ignore")
     st.download_button(
@@ -278,7 +359,6 @@ if selected_pid:
             url = (row.get("website_url") or "").strip()
             if url:
                 st.link_button("Open website", url)
-            # Parameter preview
             psub = get_parameters_for_program(root, str(row.get("program_id")))
             if not psub.empty:
                 money_like = psub[
@@ -306,21 +386,21 @@ st.subheader("Operational considerations for the active project")
 
 ops_cols = st.columns(3)
 with ops_cols[0]:
-    telem = st.checkbox("Telemetry & dispatch API available", value=True)
-    baseln = st.checkbox("Baseline methodology documented", value=True)
-    mv = st.checkbox("M&V rules clear", value=True)
-    penalties = st.checkbox("Performance penalties understood", value=False)
+    st.checkbox("Telemetry & dispatch API available", value=True)
+    st.checkbox("Baseline methodology documented", value=True)
+    st.checkbox("M&V rules clear", value=True)
+    st.checkbox("Performance penalties understood", value=False)
 with ops_cols[1]:
-    export_ok = st.checkbox("Export allowed per interconnection", value=True)
-    netting = st.checkbox("Netting/settlement interval compatible", value=True)
-    coinc = st.checkbox("Coincident peak rules mapped", value=False)
-    standby = st.checkbox("Standby charges evaluated", value=False)
+    st.checkbox("Export allowed per interconnection", value=True)
+    st.checkbox("Netting/settlement interval compatible", value=True)
+    st.checkbox("Coincident peak rules mapped", value=False)
+    st.checkbox("Standby charges evaluated", value=False)
 with ops_cols[2]:
-    warranty = st.checkbox("BESS warranty aligns with use", value=True)
-    limits = st.checkbox("Cycle/throughput limits respected", value=True)
-    dr_cap = st.checkbox("DR telemetry capable (yes/no)", value=True)
+    st.checkbox("BESS warranty aligns with use", value=True)
+    st.checkbox("Cycle/throughput limits respected", value=True)
+    st.checkbox("DR telemetry capable (yes/no)", value=True)
 
-ops_notes = st.text_area(
+st.text_area(
     "Notes",
     placeholder="Site-specific operational constraints, enrollment nuances, telemetry vendors, etc.",
 )
