@@ -1,261 +1,189 @@
 from __future__ import annotations
 
+import random
+import time
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from dre.clients.pjm import PJMClient
 
-# ---------- paths ----------
+# ----------------- paths -----------------
 
-def cache_root(project_root: Path) -> Path:
-    base = project_root / "data" / "markets" / "pjm"
-    base.mkdir(parents=True, exist_ok=True)
-    (base / "prices").mkdir(exist_ok=True)
-    (base / "market").mkdir(exist_ok=True)
-    (base / "combined").mkdir(exist_ok=True)
-    return base
+def _root() -> Path:
+    return Path("data/markets/pjm").resolve()
 
+def _ensure_dir(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
 
-# ---------- month helpers ----------
+def energy_path(market: str, year: int, yyyymm: str) -> Path:
+    sub = "energy_da" if market.upper() == "DA" else "energy_rt"
+    return _root() / sub / f"{year}" / f"{yyyymm}.parquet"
 
-def _month_start(d: date) -> datetime:
-    return datetime(d.year, d.month, 1, 0, 0, 0)
+def reserves_path(market: str, service_slug: str, year: int, yyyymm: str) -> Path:
+    sub = "reserves_da" if market.upper() == "DA" else "reserves_rt"
+    safe = service_slug.replace(" ", "_").lower()
+    return _root() / sub / safe / f"{year}" / f"{yyyymm}.parquet"
 
+def regulation_path(year: int, yyyymm: str) -> Path:
+    return _root() / "regulation" / f"{year}" / f"{yyyymm}.parquet"
 
-def _next_month(dt: datetime) -> datetime:
-    y, m = dt.year, dt.month
-    return datetime(y + 1, 1, 1, 0, 0, 0) if m == 12 else datetime(y, m + 1, 1, 0, 0, 0)
+# ----------------- month iteration -----------------
 
-
-def month_bounds(y: int, m: int) -> tuple[datetime, datetime]:
-    start = datetime(y, m, 1, 0, 0, 0)
-    end = _next_month(start)  # exclusive upper bound
-    return start, end
-
-
-def months_in_window(start: datetime, end: datetime) -> Iterable[tuple[int, int]]:
+def month_windows(start: datetime, end_exclusive: datetime) -> list[tuple[datetime, datetime, str, int]]:
     """
-    Yield (year, month) for each month whose start lies in [start, end).
-    i.e., EXCLUDES the end month (end is exclusive).
+    Return (m0, m1, yyyymm, year) for each closed-open month window in [start, end_exclusive).
     """
-    cur = datetime(start.year, start.month, 1)
-    stop = datetime(end.year, end.month, 1)
-    while cur < stop:
-        yield cur.year, cur.month
-        cur = _next_month(cur)
+    out: list[tuple[datetime, datetime, str, int]] = []
+    cur = datetime(start.year, start.month, 1, tzinfo=start.tzinfo)
+    while cur < end_exclusive:
+        nxt = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+        out.append((cur, min(nxt, end_exclusive), f"{cur:%Y%m}", cur.year))
+        cur = nxt
+    return out
 
+# ----------------- loaders -----------------
 
-def rolling_12_full_months(asof: date) -> tuple[datetime, datetime]:
-    """
-    asof=Jan-2024 -> window is Jan-2023 00:00:00 to Jan-2024 00:00:00 (exclusive end).
-    """
-    anchor = _month_start(asof)
-    end = anchor  # exclusive
-    # start = first day of the month 12 months earlier
-    y, m = anchor.year, anchor.month
-    m0 = m - 12
-    y0 = y - 1 if m0 <= 0 else y
-    m0 = m0 + 12 if m0 <= 0 else m0
-    start = datetime(y0, m0, 1, 0, 0, 0)
-    return start, end
-
-
-# ---------- parquet filenames ----------
-
-def _prices_month_fp(root: Path, y: int, m: int) -> Path:
-    return cache_root(root) / "prices" / f"prices_{y:04d}_{m:02d}.parquet"
-
-
-def _market_month_fp(root: Path, y: int, m: int) -> Path:
-    return cache_root(root) / "market" / f"market_{y:04d}_{m:02d}.parquet"
-
-
-def _combined_month_fp(root: Path, y: int, m: int) -> Path:
-    return cache_root(root) / "combined" / f"combined_{y:04d}_{m:02d}.parquet"
-
-
-# ---------- merge & ratio ----------
-
-def _merge_and_compute_ratio(prices: pd.DataFrame, mkt: pd.DataFrame) -> pd.DataFrame:
-    df = prices.copy()
-    df["datetime_beginning_ept"] = pd.to_datetime(df["datetime_beginning_ept"], errors="coerce")
-
-    if mkt is not None and not mkt.empty:
-        mkt = mkt.copy()
-        mkt["datetime_beginning_ept"] = pd.to_datetime(mkt["datetime_beginning_ept"], errors="coerce")
-
-        # accept multiple plausible field names
-        if any(c in mkt.columns for c in ["rega_hourly", "reg_a_hourly", "rega_mileage"]):
-            rega = pd.to_numeric(
-                mkt[[c for c in ["rega_hourly", "reg_a_hourly", "rega_mileage"] if c in mkt.columns]].iloc[:, 0],
-                errors="coerce",
-            ).replace(0, np.nan)
-        else:
-            rega = pd.Series(np.nan, index=mkt.index)
-
-        if any(c in mkt.columns for c in ["regd_hourly", "reg_d_hourly", "regd_mileage"]):
-            regd = pd.to_numeric(
-                mkt[[c for c in ["regd_hourly", "reg_d_hourly", "regd_mileage"] if c in mkt.columns]].iloc[:, 0],
-                errors="coerce",
-            )
-        else:
-            regd = pd.Series(np.nan, index=mkt.index)
-
-        mkt["mileage_ratio"] = (regd / rega).replace([np.inf, -np.inf], np.nan).fillna(1.0)
-        mkt_ratio = (
-            mkt[["datetime_beginning_ept", "mileage_ratio"]]
-            .dropna(subset=["datetime_beginning_ept"])
-            .groupby("datetime_beginning_ept", as_index=False)["mileage_ratio"]
-            .mean()
-        )
-        df = df.merge(mkt_ratio, on="datetime_beginning_ept", how="left")
-    else:
-        df["mileage_ratio"] = 1.0
-
-    for c in ("rmccp", "rmpcp", "mileage_ratio"):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna(subset=["datetime_beginning_ept"]).sort_values("datetime_beginning_ept")
-
-
-# ---------- fetch & cache (month) ----------
-
-def fetch_and_cache_month(client: PJMClient, root: Path, y: int, m: int) -> pd.DataFrame | None:
-    """
-    Fetch one month of prices + market, write three parquets (prices/market/combined), return combined df.
-    Uses EXCLUSIVE end-bound at client level (end - 1s).
-    """
-    start, end = month_bounds(y, m)
-
-    # prices
-    try:
-        prices = client.reg_zone_prelim_bill(start, end)
-    except Exception:
-        prices = pd.DataFrame()
-
-    # market (schema varies; don't pass fields)
-    try:
-        market = client.reg_market_results(start, end)
-    except Exception:
-        market = pd.DataFrame()
-
-    if prices is None or prices.empty:
-        return None
-
-    _prices_month_fp(root, y, m).parent.mkdir(parents=True, exist_ok=True)
-    prices.to_parquet(_prices_month_fp(root, y, m), index=False)
-
-    if market is not None and not market.empty:
-        _market_month_fp(root, y, m).parent.mkdir(parents=True, exist_ok=True)
-        market.to_parquet(_market_month_fp(root, y, m), index=False)
-
-    combined = _merge_and_compute_ratio(prices, market)
-    _combined_month_fp(root, y, m).parent.mkdir(parents=True, exist_ok=True)
-    combined.to_parquet(_combined_month_fp(root, y, m), index=False)
-    return combined
-
-
-def load_cached_month(root: Path, y: int, m: int) -> pd.DataFrame | None:
-    f = _combined_month_fp(root, y, m)
-    if f.exists():
+def _read_parquet_if_exists(path: Path) -> pd.DataFrame | None:
+    if path.exists():
         try:
-            return pd.read_parquet(f)
+            return pd.read_parquet(path)
         except Exception:
             return None
     return None
 
-
-# ---------- window loaders ----------
-
-def load_or_fetch_window(
-    client: PJMClient | None,
-    project_root: Path,
-    start: datetime,
-    end: datetime,
-    *,
-    fetch_missing: bool = False,
-) -> pd.DataFrame:
+def load_energy_cached(market: str, start: datetime, end_exclusive: datetime, **_: object) -> pd.DataFrame:
     """
-    Legacy: returns concatenated DataFrame only.
+    Load cached DA or RT energy LMPs from parquet files.
+    Extra kwargs (zone, pnode_id, etc.) are accepted and ignored for backward compatibility.
     """
-    cache_root(project_root)  # ensure directories
-    parts: list[pd.DataFrame] = []
-    for y, m in months_in_window(start, end):
-        df = load_cached_month(project_root, y, m)
-        if df is None and fetch_missing and client is not None:
-            df = fetch_and_cache_month(client, project_root, y, m)
+    frames: list[pd.DataFrame] = []
+    for _m0, _m1, yyyymm, year in month_windows(start, end_exclusive):
+        p = energy_path(market, year, yyyymm)
+        df = _read_parquet_if_exists(p)
         if df is not None and not df.empty:
-            parts.append(df)
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if not parts:
-        return pd.DataFrame(columns=["datetime_beginning_ept", "rmccp", "rmpcp", "mileage_ratio"])
-
-    out = pd.concat(parts, ignore_index=True)
-    out = out.drop_duplicates(subset=["datetime_beginning_ept"]).sort_values("datetime_beginning_ept").reset_index(drop=True)
-    keep = [c for c in ["datetime_beginning_ept", "rmccp", "rmpcp", "mileage_ratio"] if c in out.columns]
-    return out[keep]
-
-
-def load_or_fetch_window_report(
-    client: PJMClient | None,
-    project_root: Path,
-    start: datetime,
-    end: datetime,
-    *,
-    fetch_missing: bool = False,
-) -> tuple[pd.DataFrame, list[dict[str, object]]]:
-    """
-    Same as `load_or_fetch_window`, but also returns a per-month report:
-      [{'year': 2024, 'month': 1, 'action': 'loaded'|'fetched'|'missing'|'error',
-        'prices_path': '...', 'market_path': '...', 'combined_path': '...', 'rows': 744, 'error': '...'}]
-    """
-    base = cache_root(project_root)
-    parts: list[pd.DataFrame] = []
-    report: list[dict[str, object]] = []
-
-    for y, m in months_in_window(start, end):
-        prices_p = _prices_month_fp(project_root, y, m)
-        market_p = _market_month_fp(project_root, y, m)
-        comb_p = _combined_month_fp(project_root, y, m)
-
-        error_msg = None
-        df = load_cached_month(project_root, y, m)
-        action = "loaded" if df is not None else "missing"
-
-        if df is None and fetch_missing and client is not None:
-            try:
-                df = fetch_and_cache_month(client, project_root, y, m)
-                action = "fetched" if df is not None else "missing"
-            except Exception as exc:
-                action = "error"
-                error_msg = str(exc)
-
-        rows = 0 if (df is None or df.empty) else int(len(df))
+def load_reserves_cached(market: str, ancillary_service: str, start: datetime, end_exclusive: datetime) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    slug = ancillary_service.replace(" ", "_").lower()
+    for _m0, _m1, yyyymm, year in month_windows(start, end_exclusive):
+        p = reserves_path(market, slug, year, yyyymm)
+        df = _read_parquet_if_exists(p)
         if df is not None and not df.empty:
-            parts.append(df)
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-        report.append(
-            {
-                "year": y,
-                "month": m,
-                "action": action,
-                "rows": rows,
-                "prices_path": str(prices_p),
-                "market_path": str(market_p),
-                "combined_path": str(comb_p),
-                "cache_root": str(base),
-                "error": error_msg,
-            }
-        )
+def load_regulation_cached(start: datetime, end_exclusive: datetime) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for _m0, _m1, yyyymm, year in month_windows(start, end_exclusive):
+        p = regulation_path(year, yyyymm)
+        df = _read_parquet_if_exists(p)
+        if df is not None and not df.empty:
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if not parts:
-        return pd.DataFrame(columns=["datetime_beginning_ept", "rmccp", "rmpcp", "mileage_ratio"]), report
+def load_reserves_da_cached(ancillary_service: str, start: datetime, end_exclusive: datetime) -> pd.DataFrame:
+    return load_reserves_cached("DA", ancillary_service, start, end_exclusive)
 
-    out = pd.concat(parts, ignore_index=True)
-    out = out.drop_duplicates(subset=["datetime_beginning_ept"]).sort_values("datetime_beginning_ept").reset_index(drop=True)
-    keep = [c for c in ["datetime_beginning_ept", "rmccp", "rmpcp", "mileage_ratio"] if c in out.columns]
-    return out[keep], report
+def load_reserves_rt_cached(ancillary_service: str, start: datetime, end_exclusive: datetime) -> pd.DataFrame:
+    return load_reserves_cached("RT", ancillary_service, start, end_exclusive)
+
+# ----------------- prefetchers -----------------
+
+def _sleep_between(sleep_range: tuple[float, float]) -> None:
+    lo, hi = sleep_range
+    time.sleep(random.uniform(lo, hi))
+
+def prefetch_energy(
+    client: PJMClient,
+    start: datetime,
+    end_exclusive: datetime,
+    market: str = "DA",
+    pnode_id: int = 1,
+    sleep_range: tuple[float, float] = (1.0, 2.0),
+    force: bool = False,
+) -> int:
+    """
+    Prefetch DA or RT LMPs at pnode_id=1 (PJM RTO) and write monthly parquet with your naming convention.
+    """
+    written = 0
+    fetch_fn = client.da_hrl_lmps if market.upper() == "DA" else client.rt_hrl_lmps
+
+    for m0, m1, yyyymm, year in month_windows(start, end_exclusive):
+        path = energy_path(market, year, yyyymm)
+        if path.exists() and not force:
+            continue
+        df = fetch_fn(m0, m1, pnode_id=pnode_id)
+        if df is not None and not df.empty:
+            _ensure_dir(path)
+            df.to_parquet(path, index=False)
+            written += 1
+            _sleep_between(sleep_range)
+    return written
+
+def prefetch_reserves(
+    client: PJMClient,
+    start: datetime,
+    end_exclusive: datetime,
+    market: str,
+    ancillary_services: Iterable[str],
+    sleep_range: tuple[float, float] = (1.0, 2.0),
+    force: bool = False,
+) -> int:
+    """
+    Prefetch DA or RT reserves using dataset-appropriate product names.
+    """
+    written = 0
+    if market.upper() == "DA":
+        fetch_fn = client.da_ancillary_services
+        valid = set(PJMClient.DA_ANCILLARY_PRODUCTS)
+    else:
+        fetch_fn = client.ancillary_services
+        valid = set(PJMClient.RT_ANCILLARY_PRODUCTS)
+
+    for svc in ancillary_services:
+        if svc not in valid:
+            print(f"[prefetch_reserves] Skipping invalid product for {market}: {svc!r}")
+            continue
+        slug = svc.replace(" ", "_").lower()
+        for m0, m1, yyyymm, year in month_windows(start, end_exclusive):
+            path = reserves_path(market, slug, year, yyyymm)
+            if path.exists() and not force:
+                continue
+            df = fetch_fn(m0, m1, ancillary_service=svc)
+            if df is not None and not df.empty:
+                _ensure_dir(path)
+                df.to_parquet(path, index=False)
+                written += 1
+                _sleep_between(sleep_range)
+    return written
+
+def prefetch_regulation(
+    client: PJMClient,
+    start: datetime,
+    end_exclusive: datetime,
+    sleep_range: tuple[float, float] = (1.0, 2.0),
+    force: bool = False,
+) -> int:
+    """
+    Prefetch regulation hourlies (rmccp, rmpcp) as monthly parquet.
+    """
+    written = 0
+    for m0, m1, yyyymm, year in month_windows(start, end_exclusive):
+        path = regulation_path(year, yyyymm)
+        if path.exists() and not force:
+            continue
+        df_bill = client.reg_zone_prelim_bill(m0, m1)
+        _sleep_between(sleep_range)
+        df_result = client.reg_market_results(m0, m1)
+        df = pd.merge(df_bill, df_result, on="ts", how="inner")
+        if df is not None and not df.empty:
+            _ensure_dir(path)
+            df.to_parquet(path, index=False)
+            written += 1
+            _sleep_between(sleep_range)
+    return written
